@@ -30,7 +30,7 @@ export interface IIsErrorMessage {
 }
 
 export interface IMessageHandler {
-  test(message: any): boolean;
+  test(message: any, event?: any): boolean;
   handle(message: any): any;
 }
 
@@ -242,7 +242,7 @@ export class WindowPostMessageProxy {
       const handled = this.handlers.some(handler => {
         let canMessageBeHandled = false;
         try {
-          canMessageBeHandled = handler.test(message);
+          canMessageBeHandled = handler.test(message, event);
         }
         catch (e) {
           if (!this.suppressWarnings) {
@@ -254,7 +254,29 @@ export class WindowPostMessageProxy {
           let responseMessagePromise: Promise<any>;
 
           try {
-            responseMessagePromise = Promise.resolve(handler.handle(message));
+            const returnVal = handler.handle(message);
+            if(returnVal.result instanceof Promise){
+              returnVal.result.then((val: any) => {
+                responseMessagePromise = Promise.resolve(val);
+
+                responseMessagePromise
+                .then((responseMessage: any) => {
+                  if (!responseMessage) {
+                    const warningMessage = `Handler for message: ${JSON.stringify(message, null, '  ')} did not return a response message. The default response message will be returned instead.`;
+                    if (!this.suppressWarnings) {
+                      console.warn(`Proxy(${this.name}): ${warningMessage}`);
+                    }
+                    responseMessage = {
+                      warning: warningMessage
+                    };
+                  }
+                  this.sendResponse(sendingWindow, responseMessage, trackingProperties);
+                });
+
+              });
+              return true;
+            }
+            responseMessagePromise = Promise.resolve(returnVal);
           }
           catch (e) {
             if (!this.suppressWarnings) {
@@ -262,9 +284,8 @@ export class WindowPostMessageProxy {
             }
             responseMessagePromise = Promise.resolve();
           }
-
           responseMessagePromise
-            .then(responseMessage => {
+            .then((responseMessage: any) => {
               if (!responseMessage) {
                 const warningMessage = `Handler for message: ${JSON.stringify(message, null, '  ')} did not return a response message. The default response message will be returned instead.`;
                 if (!this.suppressWarnings) {
@@ -308,9 +329,37 @@ export class WindowPostMessageProxy {
       if (isErrorMessage) {
         deferred.reject(message);
       }
-      else {
-        deferred.resolve(message);
+
+      let handledMsg = message;
+      const handledReceivingMsg = this.handlers.some(handler => {
+        let canMessageBeHandled = false;
+        try {
+          canMessageBeHandled = handler.test(handledMsg, event);
+        }
+        catch (e) {
+          if (!this.suppressWarnings) {
+            console.warn(`Proxy(${this.name}): Error occurred when handler was testing incoming message:`, JSON.stringify(handledMsg, null, '  '), "Error: ", e);
+          }
+        }
+
+        if (canMessageBeHandled) {
+          try {
+            handledMsg = handler.handle(handledMsg);
+          } catch (e) {
+            if (!this.suppressWarnings) {
+              console.warn(`Proxy(${this.name}): Error occurred when handler was testing incoming message:`, JSON.stringify(handledMsg, null, '  '), "Error: ", e);
+            }
+          }
+          return true;
+        }
+      });
+
+      if (!handledReceivingMsg && !this.suppressWarnings) {
+        console.warn(`Proxy(${this.name}) did not handle message. Handlers: ${this.handlers.length}  Message: ${JSON.stringify(message, null, '')}.`);
+        // this.sendResponse({ notHandled: true }, trackingProperties);
       }
+
+      deferred.resolve(handledMsg);
 
       // TODO: Move to .finally clause up where promise is created for better maitenance like original proxy code.
       delete this.pendingRequestPromises[trackingProperties.id];
